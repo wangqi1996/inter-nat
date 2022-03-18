@@ -1,13 +1,10 @@
 from collections import namedtuple
-from itertools import groupby
 
 import numpy as np
 import torch
-from fairseq import utils
-from fairseq.data.dictionary import Dictionary
-from fairseq.iterative_refinement_generator import IterativeRefinementGenerator
 
-from nat_base.util import init_global_count_tokens
+from fairseq import utils
+from fairseq.iterative_refinement_generator import IterativeRefinementGenerator
 
 DecoderOut = namedtuple('IterativeRefinementDecoderOut', [
     'output_tokens',
@@ -20,6 +17,7 @@ DecoderOut = namedtuple('IterativeRefinementDecoderOut', [
 
 
 def remove_repeats_tensor(inputs, blank_index=-1):
+    # remove the repeat in one sentence.
     inputs = inputs.data.cpu().tolist()
     seq_len = len(inputs)
     output = []
@@ -32,31 +30,6 @@ def remove_repeats_tensor(inputs, blank_index=-1):
         if item != output[-1] and item != blank_index:
             output.append(item)
     return torch.Tensor(output)
-
-
-def remove_repeats(lst_of_sentences):
-    lst = []
-    for sentence in lst_of_sentences:
-        lst.append(" ".join([x[0] for x in groupby(sentence.split())]))
-    return lst
-
-
-def reverse(
-        dictionary: Dictionary,
-        tensor,
-        bpe_symbol=None,
-        escape_unk=False,
-        extra_symbols_to_ignore=None,
-        unk_string=None,
-        remove_repeat=False,
-):
-    return dictionary.string(
-        tensor,
-        bpe_symbol=bpe_symbol,
-        escape_unk=escape_unk,
-        extra_symbols_to_ignore=extra_symbols_to_ignore,
-        unk_string=unk_string
-    )
 
 
 class NAGenerator(IterativeRefinementGenerator):
@@ -73,9 +46,7 @@ class NAGenerator(IterativeRefinementGenerator):
             adaptive=True,
             retain_history=False,
             reranking=False,
-            infer_with_tgt=False,
             infer_with_reflen=False,
-            ctc_loss=False,
             args=None
     ):
         max_iter = 0
@@ -91,13 +62,13 @@ class NAGenerator(IterativeRefinementGenerator):
             retain_history=retain_history,
             reranking=reranking
         )
-        self.infer_with_tgt = infer_with_tgt
-        self.infer_with_reflen = infer_with_reflen or infer_with_tgt
+        self.infer_with_reflen = infer_with_reflen
+        self.remove_repeat = True
+        self.use_oracle_mat = getattr(args, "use_oracle_mat", False)
+        print("self.use_oracle_mat:", self.use_oracle_mat)
 
-        self.eval_accuracy = getattr(args, "eval_accuracy", False)
-        init_global_count_tokens()
-
-        self.ctc_loss = ctc_loss
+        self.write_tree = getattr(args, "write_tree", "")
+        self.write_reference_pairs = getattr(args, "write_reference_pairs", "")
 
     @torch.no_grad()
     def generate(self, models, sample, **unused):
@@ -126,8 +97,7 @@ class NAGenerator(IterativeRefinementGenerator):
         encoder_out = model.forward_encoder([src_tokens, src_lengths, True])
 
         # fixed version of CNAT
-        tgt_tokens = sample["target"] if "target" in sample and (
-                self.infer_with_tgt or self.infer_with_reflen) else None
+        tgt_tokens = sample["target"] if self.infer_with_reflen else None
 
         if self.infer_with_reflen and tgt_tokens is not None:
             prev_decoder_out = model.initialize_output_tokens(encoder_out, src_tokens, tgt_tokens=tgt_tokens)
@@ -166,7 +136,7 @@ class NAGenerator(IterativeRefinementGenerator):
         def finalized_hypos(step, prev_out_token, prev_out_score, prev_out_attn):
             cutoff = prev_out_token.ne(self.pad)
             tokens = prev_out_token[cutoff]
-            if self.ctc_loss:
+            if self.remove_repeat:
                 tokens = remove_repeats_tensor(tokens, blank_index=3)  # unk as blank
             if prev_out_score is None:
                 scores, score = None, None
@@ -193,12 +163,11 @@ class NAGenerator(IterativeRefinementGenerator):
                 "eos_penalty": self.eos_penalty,
                 "max_ratio": self.max_ratio,
                 "decoding_format": self.decoding_format,
-                "tgt_tokens": tgt_tokens if self.infer_with_tgt else None,
                 "sample": sample,
                 "generate": True,
-                "reference": sample["target"],
-                "eval_accuracy": self.eval_accuracy
-
+                "use_oracle_mat": self.use_oracle_mat,
+                "write_tree": self.write_tree,
+                "write_reference_pairs": self.write_reference_pairs
             }
             prev_decoder_out = prev_decoder_out._replace(
                 step=step,

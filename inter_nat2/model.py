@@ -2,57 +2,61 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+import os
+
 from fairseq.models import register_model, register_model_architecture
 from fairseq.modules.transformer_sentence_encoder import init_bert_params
-from inter_nat.module import RelationBasedAttention
 from inter_nat.classifier import RelationClassifier
-from inter_nat.util import ParentRelationMat
-
-from nat_base.layer import BlockedDecoderLayer
-from nat_base.vanilla_nat import NATDecoder, NAT, nat_wmt_en_de, nat_iwslt16_de_en, nat_toy, nat_iwslt14_de_en
+from nat_base.util import get_base_mask
+from nat_base.vanilla_nat import NATDecoder, NAT, nat_wmt_en_de, nat_iwslt14_de_en
 
 
-class RelationBasedLayer(BlockedDecoderLayer):
-
-    def build_self_attention(self, embed_dim, args, add_bias_kv=False, add_zero_attn=False, layer_id=0, **kwargs):
-        if layer_id == 0:
-            return RelationBasedAttention(
-                embed_dim=embed_dim,
-                num_heads=args.decoder_attention_heads,
-                dropout=args.attention_dropout,
-                add_bias_kv=add_bias_kv,
-                add_zero_attn=add_zero_attn,
-                self_attention=True,
-                q_noise=self.quant_noise,
-                qn_block_size=self.quant_noise_block_size
-            )
-        else:
-            return super().build_self_attention(embed_dim, args, add_bias_kv=add_bias_kv, add_zero_attn=add_zero_attn,
-                                                layer_id=layer_id, **kwargs)
-
-
-class RelationBasedDecoder(NATDecoder):
+class TestDecoder(NATDecoder):
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(args, dictionary, embed_tokens, no_encoder_attn)
 
         self.dep_file = getattr(self.args, "dep_file", "iwslt16")
 
-        self.relative_dep_mat = ParentRelationMat(valid_subset=self.args.valid_subset, args=args,
-                                                  dep_file=self.dep_file)
-
         self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, layer=self.layers[-1],
                                                  token_pad=self.padding_idx)
 
-    def build_decoder_layer(self, args, no_encoder_attn=False, rel_keys=None, rel_vals=None, layer_id=0, **kwargs):
-        return RelationBasedLayer(args, no_encoder_attn=no_encoder_attn, relative_keys=rel_keys,
-                                  relative_vals=rel_vals, layer_id=layer_id, **kwargs)
-
     def forward_relation(self, hidden_state, sample, encoder_out, target_tokens, **kwargs):
         if kwargs.get("generate", False):
-            dependency_mat = self.dep_classifier.inference(sample=sample, hidden_state=hidden_state,
-                                                           target_tokens=target_tokens,
-                                                           encoder_out=encoder_out)
-            return {}, dependency_mat
+            if kwargs.get("write_tree", "") != "":
+                score = self.dep_classifier._forward_classifier(hidden_state, target_tokens.eq(self.dictionary.pad()),
+                                                                encoder_out)
+                head = score.argmax(-1)
+                predict_path = os.path.join(kwargs['write_tree'], "predict.tree")
+
+                sample_ids = sample['id']
+                reference_tree = self.dep_classifier.biaffine_parser.get_reference(sample_ids)
+                reference_path = os.path.join(kwargs['write_tree'], "reference.tree")
+
+                mask = target_tokens.ne(self.dictionary.pad())
+                with open(predict_path, 'a') as f_pre, open(reference_path, 'a') as f_ref:
+                    for index, h in enumerate(head):
+                        h_str = ",".join([str(i) for i in h[mask[index]].cpu().tolist()])
+                        f_pre.write(h_str + '\n')
+                        h_str = ",".join([str(i) for i in reference_tree[index][mask[index]].cpu().tolist()])
+                        f_ref.write(h_str + '\n')
+
+            if kwargs.get("write_reference_pairs", "") != "":
+                sample_ids = sample['id']
+                reference_tree = self.dep_classifier.biaffine_parser.get_reference(sample_ids)
+                mask = get_base_mask(sample['target'])
+                with open(kwargs['write_reference_pairs'], 'a') as f:
+                    for index, tree in enumerate(reference_tree):
+                        token = self.dictionary.string(sample['target'][index][mask[index]]).split(' ')
+                        tree = tree[mask[index]]
+                        content = []
+                        for i, t in enumerate(tree):
+                            if t == 0:
+                                content.append(token[i])
+                            else:
+                                content.append(token[i] + ',' + token[t - 1])
+                        content = str(sample_ids[index].item()) + ";" + ";".join(content)
+                        f.write(content + '\n')
+
         else:
             ref_embedding, _, _ = self.forward_embedding(sample['target'])
             ref_embedding = ref_embedding.transpose(0, 1)
@@ -60,7 +64,7 @@ class RelationBasedDecoder(NATDecoder):
                                                ref_embedding=ref_embedding, encoder_out=encoder_out,
                                                **kwargs)
 
-            return loss, None
+            return loss
 
     def extract_features(
             self,
@@ -73,17 +77,8 @@ class RelationBasedDecoder(NATDecoder):
         x, decoder_padding_mask, position = self.forward_decoder_inputs(prev_output_tokens, encoder_out=encoder_out)
         x = x.transpose(0, 1)
 
-        if not unused.get("use_oracle_mat", False):
-            dep_loss, dep_mat = self.forward_relation(hidden_state=x,
-                                                      target_tokens=prev_output_tokens,
-                                                      encoder_out=encoder_out, **unused)
-        else:
-            dep_loss, dep_mat = None, None
-
-        if dep_mat is not None:
-            unused['dependency_mat'] = dep_mat
-        else:
-            unused['dependency_mat'] = self.get_dependency_mat(unused['sample'])
+        dep_loss = self.forward_relation(hidden_state=x, encoder_out=encoder_out, target_tokens=prev_output_tokens,
+                                         **unused)
 
         for i, layer in enumerate(self.layers):
             x, attn, _ = layer(
@@ -106,22 +101,16 @@ class RelationBasedDecoder(NATDecoder):
 
         return x, {"dep_classifier_loss": dep_loss}
 
-    def get_dependency_mat(self, sample, **kwargs):
-        sample_ids = sample['id'].cpu().tolist()
-        target_token = sample['target']
-        dependency_mat = self.relative_dep_mat.get_relation_mat(sample_ids, target_token, training=self.training)
-        return dependency_mat
 
-
-SuperClass, model_name = NAT, "inter"
+SuperClass, model_name = NAT, "test"
 
 
 @register_model(model_name)
-class InterNAT(SuperClass):
+class TestNAT(SuperClass):
 
     @classmethod
     def build_decoder(cls, args, tgt_dict, embed_tokens):
-        decoder = RelationBasedDecoder(args, tgt_dict, embed_tokens)
+        decoder = TestDecoder(args, tgt_dict, embed_tokens)
         if getattr(args, "apply_bert_init", False):
             decoder.apply(init_bert_params)
 
@@ -174,15 +163,10 @@ class InterNAT(SuperClass):
 
 
 @register_model_architecture(model_name, model_name + '_wmt')
-def inter_nat_wmt(args):
+def test_nat_wmt(args):
     nat_wmt_en_de(args)
 
 
-@register_model_architecture(model_name, model_name + '_iwslt16')
-def inter_nat_iwslt16_deen(args):
-    nat_iwslt16_de_en(args)
-
-
-@register_model_architecture(model_name, model_name + '_iwslt14')
-def inter_nat_iwslt14_deen(args):
+@register_model_architecture(model_name, model_name + '_iwslt')
+def test_nat_iwslt16_deen(args):
     nat_iwslt14_de_en(args)

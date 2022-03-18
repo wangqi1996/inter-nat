@@ -1,12 +1,12 @@
 export CUDA_VISIBLE_DEVICES=$1
 export TOKENIZERS_PARALLELISM=false
 DISTILL=/home/data_ti5_c/wangdq/data/fairseq/iwslt14/deen-AT/
-SAVEDIR=/home/wangdq/save/inter/iwslt14_deen_distill/grand
-LOGDIR=/home/wangdq/log/inter/iwslt14_deen_distill/grand
+SAVEDIR=/home/wangdq/save/inter/iwslt14_deen_distill/tree0
+LOGDIR=/home/wangdq/log/inter/iwslt14_deen_distill/tree0
 fairseq-train $DISTILL \
-  --user-dir /home/data_ti5_c/wangdq/new/nat/inter_nat \
+  --user-dir /home/data_ti5_c/wangdq/new/nat/inter_nat2 \
   --save-dir $SAVEDIR --tensorboard-logdir $LOGDIR \
-  --ddp-backend=no_c10d --task nat --arch inter_iwslt14 \
+  --ddp-backend=no_c10d --task nat --arch test_iwslt \
   --eval-bleu --eval-bleu-args '{"max_len_a": 1.2, "max_len_b": 10, "max_iter": 0}' \
   --eval-bleu-detok moses --eval-bleu-remove-bpe \
   --best-checkpoint-metric bleu --maximize-best-checkpoint-metric \

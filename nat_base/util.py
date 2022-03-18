@@ -32,12 +32,21 @@ def new_arange(x, *size):
 
 def get_base_mask(target_tokens):
     """ mask=True 表示不是特殊字符"""
-    pad = 0
-    bos = 1
+    pad = 1
+    bos = 0
     eos = 2
 
     target_masks = target_tokens.ne(pad) & \
                    target_tokens.ne(bos) & \
                    target_tokens.ne(eos)
+
+    return target_masks
+
+
+def get_pad_mask(target_tokens):
+    """ mask=True 表示不是特殊字符"""
+    pad = 1
+
+    target_masks = target_tokens.ne(pad)
 
     return target_masks

@@ -2,7 +2,8 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/dep_nat.iml" filepath="$PROJECT_DIR$/.idea/dep_nat.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../fairseq/.idea/fairseq.iml" filepath="$PROJECT_DIR$/../fairseq/.idea/fairseq.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/nat.iml" filepath="$PROJECT_DIR$/.idea/nat.iml" />
     </modules>
   </component>
 </project>

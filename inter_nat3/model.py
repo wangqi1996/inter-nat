@@ -2,35 +2,18 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+import numpy as np
+import torch
+
 from fairseq.models import register_model, register_model_architecture
 from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from inter_nat.classifier import RelationClassifier
-from inter_nat.module import RelationBasedAttention
+from inter_nat.model import RelationBasedLayer, InterNAT
 from inter_nat.util import ParentRelationMat
-from nat_base.layer import BlockedDecoderLayer
 from nat_base.vanilla_nat import NATDecoder, NAT, nat_wmt_en_de, nat_iwslt14_de_en
 
 
-class RelationBasedLayer(BlockedDecoderLayer):
-
-    def build_self_attention(self, embed_dim, args, add_bias_kv=False, add_zero_attn=False, layer_id=0, **kwargs):
-        if True or layer_id == 0:
-            return RelationBasedAttention(
-                embed_dim=embed_dim,
-                num_heads=args.decoder_attention_heads,
-                dropout=args.attention_dropout,
-                add_bias_kv=add_bias_kv,
-                add_zero_attn=add_zero_attn,
-                self_attention=True,
-                q_noise=self.quant_noise,
-                qn_block_size=self.quant_noise_block_size
-            )
-        else:
-            return super().build_self_attention(embed_dim, args, add_bias_kv=add_bias_kv, add_zero_attn=add_zero_attn,
-                                                layer_id=layer_id, **kwargs)
-
-
-class RelationBasedDecoder(NATDecoder):
+class Test3Decoder(NATDecoder):
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(args, dictionary, embed_tokens, no_encoder_attn)
 
@@ -42,9 +25,12 @@ class RelationBasedDecoder(NATDecoder):
         self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, token_pad=self.padding_idx,
                                                  layer=self.layers[-1])
 
+        # 对三角矩阵
+        self._build_diag(200)
+
     def build_decoder_layer(self, args, no_encoder_attn=False, rel_keys=None, rel_vals=None, layer_id=0, **kwargs):
         return RelationBasedLayer(args, no_encoder_attn=no_encoder_attn, relative_keys=rel_keys,
-                                  relative_vals=rel_vals, layer_id=layer_id, **kwargs)
+                                  relative_vals=rel_vals, layer_id=0, **kwargs)
 
     def forward_relation(self, hidden_state, sample, encoder_out, target_tokens, **kwargs):
         if kwargs.get("generate", False):
@@ -60,6 +46,12 @@ class RelationBasedDecoder(NATDecoder):
                                                **kwargs)
 
             return loss, None
+
+    def _build_diag(self, max_seq_len):
+        self.max_seq_len = max_seq_len
+        _mat = [1 for _ in range(self.max_seq_len)]
+        _mat2 = [1 for _ in range(self.max_seq_len - 1)]
+        self.max_dep_mat = torch.from_numpy(np.diag(_mat2, -1) + np.diag(_mat, 0) + np.diag(_mat2, 1)).cuda()
 
     def extract_features(
             self,
@@ -85,6 +77,16 @@ class RelationBasedDecoder(NATDecoder):
             unused['dependency_mat'] = self.get_dependency_mat(unused['sample'])
 
         for i, layer in enumerate(self.layers):
+            if i == 1:
+                # 替换成对三角矩阵
+                batch_size, seq_len = prev_output_tokens.shape
+                if seq_len > self.max_seq_len:
+                    self._build_diag(seq_len)
+                dep_mat = self.max_dep_mat[:seq_len, :seq_len].repeat(batch_size, 1, 1)
+                dep_mat = dep_mat.masked_fill(decoder_padding_mask.unsqueeze(-1), 0)
+                dep_mat = dep_mat.masked_fill(decoder_padding_mask.unsqueeze(-2), 0)
+                unused['dependency_mat'] = dep_mat
+
             x, attn, _ = layer(
                 x,
                 encoder_out.encoder_out if not self.layerwise_attn else encoder_out.encoder_states[i],
@@ -112,64 +114,19 @@ class RelationBasedDecoder(NATDecoder):
         return dependency_mat
 
 
-SuperClass, model_name = NAT, "inter"
+model_name = "inter3"
 
 
 @register_model(model_name)
-class InterNAT(SuperClass):
+class InterNAT3(InterNAT):
 
     @classmethod
     def build_decoder(cls, args, tgt_dict, embed_tokens):
-        decoder = RelationBasedDecoder(args, tgt_dict, embed_tokens)
+        decoder = Test3Decoder(args, tgt_dict, embed_tokens)
         if getattr(args, "apply_bert_init", False):
             decoder.apply(init_bert_params)
 
         return decoder
-
-    @staticmethod
-    def add_args(parser):
-        SuperClass.add_args(parser)
-        parser.add_argument('--dep-file', type=str, default="iwslt16")  # wmt16
-        parser.add_argument('--tune', action="store_true")
-        parser.add_argument('--weight', type=float, default=1)
-        parser.add_argument('--noglancing', action="store_true")
-
-    def forward(
-            self, src_tokens, src_lengths, prev_output_tokens, tgt_tokens, **kwargs
-    ):
-        encoder_out = self.encoder(src_tokens, src_lengths=src_lengths)
-
-        word_ins_out, other = self.decoder(
-            normalize=False,
-            prev_output_tokens=prev_output_tokens,
-            encoder_out=encoder_out,
-            inner=True,
-            **kwargs
-        )
-
-        losses = {
-            "word_ins": {
-                "out": word_ins_out,
-                "tgt": tgt_tokens,
-                "mask": tgt_tokens.ne(self.pad),
-                "ls": self.args.label_smoothing,
-                "nll_loss": True,
-            }
-        }
-        # length prediction
-        if self.decoder.length_loss_factor > 0:
-            length_out = self.decoder.forward_length(normalize=False, encoder_out=encoder_out)
-            length_tgt = self.decoder.forward_length_prediction(length_out, encoder_out, tgt_tokens)
-            losses["length"] = {
-                "out": length_out,
-                "tgt": length_tgt,
-                "factor": self.decoder.length_loss_factor
-            }
-
-        dep_classifier_loss = other['dep_classifier_loss']
-        losses.update(dep_classifier_loss)
-
-        return losses
 
 
 @register_model_architecture(model_name, model_name + '_wmt')

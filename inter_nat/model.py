@@ -4,15 +4,17 @@
 # LICENSE file in the root directory of this source tree.
 from fairseq.models import register_model, register_model_architecture
 from fairseq.modules.transformer_sentence_encoder import init_bert_params
-
+from inter_nat.classifier import RelationClassifier
+from inter_nat.module import RelationBasedAttention
+from inter_nat.util import ParentRelationMat
 from nat_base.layer import BlockedDecoderLayer
-from nat_base.vanilla_nat import NATDecoder, NAT, nat_wmt_en_de, nat_iwslt16_de_en, nat_toy
+from nat_base.vanilla_nat import NATDecoder, NAT, nat_wmt_en_de, nat_iwslt14_de_en
 
 
 class RelationBasedLayer(BlockedDecoderLayer):
 
     def build_self_attention(self, embed_dim, args, add_bias_kv=False, add_zero_attn=False, layer_id=0, **kwargs):
-        if layer_id == 0:
+        if True or layer_id == 0:
             return RelationBasedAttention(
                 embed_dim=embed_dim,
                 num_heads=args.decoder_attention_heads,
@@ -28,7 +30,7 @@ class RelationBasedLayer(BlockedDecoderLayer):
                                                 layer_id=layer_id, **kwargs)
 
 
-class DEPRelativeDecoder(NATDecoder):
+class RelationBasedDecoder(NATDecoder):
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(args, dictionary, embed_tokens, no_encoder_attn)
 
@@ -37,16 +39,27 @@ class DEPRelativeDecoder(NATDecoder):
         self.relative_dep_mat = ParentRelationMat(valid_subset=self.args.valid_subset, args=args,
                                                   dep_file=self.dep_file)
 
-        if args.valid_subset == "valid":
-            self.relative_dep_mat = RelativeDepNoSubMat(valid_subset=self.args.valid_subset, args=args,
-                                                        dep_file=self.dep_file)
-
-        self.dep_classifier = DepHeadClassifier(relative_dep_mat=self.relative_dep_mat, args=args,
-                                                dep_file=self.dep_file)
+        self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, token_pad=self.padding_idx,
+                                                 layer=self.layers[-1])
 
     def build_decoder_layer(self, args, no_encoder_attn=False, rel_keys=None, rel_vals=None, layer_id=0, **kwargs):
-        return DEPRelativeGLATDecoderLayer(args, no_encoder_attn=no_encoder_attn, relative_keys=rel_keys,
-                                           relative_vals=rel_vals, layer_id=layer_id, **kwargs)
+        return RelationBasedLayer(args, no_encoder_attn=no_encoder_attn, relative_keys=rel_keys,
+                                  relative_vals=rel_vals, layer_id=layer_id, **kwargs)
+
+    def forward_relation(self, hidden_state, sample, encoder_out, target_tokens, **kwargs):
+        if kwargs.get("generate", False):
+            dependency_mat = self.dep_classifier.inference(sample=sample, hidden_state=hidden_state,
+                                                           target_tokens=target_tokens,
+                                                           encoder_out=encoder_out)
+            return {}, dependency_mat
+        else:
+            ref_embedding, _, _ = self.forward_embedding(sample['target'])
+            ref_embedding = ref_embedding.transpose(0, 1)
+            loss = self.dep_classifier.forward(sample=sample, hidden_state=hidden_state,
+                                               ref_embedding=ref_embedding, encoder_out=encoder_out,
+                                               **kwargs)
+
+            return loss, None
 
     def extract_features(
             self,
@@ -59,9 +72,12 @@ class DEPRelativeDecoder(NATDecoder):
         x, decoder_padding_mask, position = self.forward_decoder_inputs(prev_output_tokens, encoder_out=encoder_out)
         x = x.transpose(0, 1)
 
-        dep_loss, dep_mat, mix_hidden = self.forward_classifier(hidden_state=x, position_embedding=position,
-                                                                target_tokens=prev_output_tokens,
-                                                                encoder_out=encoder_out, **unused)
+        if not unused.get("use_oracle_mat", False):
+            dep_loss, dep_mat = self.forward_relation(hidden_state=x,
+                                                      target_tokens=prev_output_tokens,
+                                                      encoder_out=encoder_out, **unused)
+        else:
+            dep_loss, dep_mat = None, None
 
         if dep_mat is not None:
             unused['dependency_mat'] = dep_mat
@@ -91,35 +107,20 @@ class DEPRelativeDecoder(NATDecoder):
 
     def get_dependency_mat(self, sample, **kwargs):
         sample_ids = sample['id'].cpu().tolist()
-        target_token = sample['prev_target']
-        dependency_mat = self.relative_dep_mat.get_dependency_mat(sample_ids, target_token, training=self.training)
+        target_token = sample['target']
+        dependency_mat = self.relative_dep_mat.get_relation_mat(sample_ids, target_token, training=self.training)
         return dependency_mat
 
-    def forward_classifier(self, hidden_state, sample, **kwargs):
 
-        if kwargs.get("generate", False):
-            # 生成
-            dependency_mat = self.dep_classifier.inference(sample=sample, hidden_state=hidden_state, **kwargs)
-            return {}, dependency_mat, None
-        else:
-            ref_embedding, _, _ = self.forward_embedding(sample['target'])
-            ref_embedding = ref_embedding.transpose(0, 1)
-            loss, dep_mat, mix_hidden = self.dep_classifier.inference_accuracy(sample=sample, hidden_state=hidden_state,
-                                                                               ref_embedding=ref_embedding,
-                                                                               **kwargs)
-
-            return loss, dep_mat, mix_hidden
-
-
-SuperClass, model_name = NAT, "dep"
+SuperClass, model_name = NAT, "inter"
 
 
 @register_model(model_name)
-class DEPNAT(SuperClass):
+class InterNAT(SuperClass):
 
     @classmethod
     def build_decoder(cls, args, tgt_dict, embed_tokens):
-        decoder = DEPRelativeDecoder(args, tgt_dict, embed_tokens)
+        decoder = RelationBasedDecoder(args, tgt_dict, embed_tokens)
         if getattr(args, "apply_bert_init", False):
             decoder.apply(init_bert_params)
 
@@ -128,7 +129,6 @@ class DEPNAT(SuperClass):
     @staticmethod
     def add_args(parser):
         SuperClass.add_args(parser)
-        parser.add_argument('--use-oracle-mat', action="store_true")
         parser.add_argument('--dep-file', type=str, default="iwslt16")  # wmt16
         parser.add_argument('--tune', action="store_true")
         parser.add_argument('--weight', type=float, default=1)
@@ -173,15 +173,10 @@ class DEPNAT(SuperClass):
 
 
 @register_model_architecture(model_name, model_name + '_wmt')
-def dep_relative_glat_wmt(args):
+def inter_nat_wmt(args):
     nat_wmt_en_de(args)
 
 
 @register_model_architecture(model_name, model_name + '_iwslt')
-def dep_relative_glat_iwslt16_de_en(args):
-    nat_iwslt16_de_en(args)
-
-
-@register_model_architecture(model_name, model_name + '_toy')
-def dep_relative_glat_toy(args):
-    nat_toy(args)
+def inter_nat_iwslt16_deen(args):
+    nat_iwslt14_de_en(args)

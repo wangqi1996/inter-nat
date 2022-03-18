@@ -13,13 +13,17 @@ import os
 from fairseq import utils
 from fairseq.data import Dictionary, indexed_dataset, data_utils
 
-DATASET = "/home/data_ti5_c/wangdq/data/fairseq/iwslt14/deen-AT/"
-save_dir = "/home/wangdq/dependency/iwslt16-deen/"
-split = "test"
+# DATASET = "/home/data_ti5_c/wangdq/data/fairseq/iwslt14/deen-AT/"
+# save_dir = "/home/wangdq/dependency/iwslt16-deen/"
+
+DATASET = "/home/data_ti5_c/wangdq/data/fairseq/wmt14/ende-fairseq/"
+save_dir = "/home/wangdq/dependency/wmt-ende/"
+
+split = "train"
 os.makedirs(save_dir, exist_ok=True)
 
-source_lang = "de"
-target_lang = "en"
+source_lang = "en"
+target_lang = "de"
 
 if target_lang == "de":
     resource = "/home/data_ti5_c/wangdq/model/tree/de/"
@@ -151,7 +155,6 @@ class DependencyTree():
             dependency_input += (raw_text + '\n\n')  # \n\n是stanza指定的换行符
             bpe_list.append(bpe_text.split(' '))
             raw_list.append(raw_text.split(' '))
-            break
 
         # 依存树解析
         dependency_output = self.dependency_tree(dependency_input.rstrip()).to_dict()

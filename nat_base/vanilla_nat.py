@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from fairseq.models.nat.nonautoregressive_transformer import (
     DecoderOut,
     NATransformerModel,
@@ -13,8 +14,7 @@ from fairseq.models.nat.nonautoregressive_transformer import (
 )
 from fairseq.models.transformer import TransformerEncoder
 from fairseq.modules import LayerDropModuleList
-
-from .layer import BlockedDecoderLayer, ContentTrainer, BlockedEncoderLayer
+from .layer import BlockedDecoderLayer, BlockedEncoderLayer
 from .modules import RelativePositionEmbeddings
 
 INF = 1e10
@@ -23,37 +23,16 @@ DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
-def _maybe_upsample_3d(embedding, batch_first=True):
-    def _us(x, s):
-        batch_size, seq_len, dim = x.shape
-        _x = x.unsqueeze(-2).expand(batch_size, seq_len, s, dim).reshape(batch_size, seq_len * s, dim)
-        return _x
-
-    if not batch_first:
-        embedding = embedding.transpose(0, 1)
-    r = _us(embedding, 2)
-    if not batch_first:
-        r = r.transpose(0, 1)
-    return r
-
-
-def _maybe_upsample_2d(tokens):
-    def _us(x, s):
-        batch_size, seq_len = x.shape
-        _x = x.unsqueeze(-1).expand(batch_size, seq_len, s).reshape(batch_size, seq_len * s)
-        return _x
-
-    return _us(tokens, 2)
-
-
 def _softcopy_assignment(src_lens, trg_lens, tau=0.3):
     max_trg_len = trg_lens.max()
     max_src_len = src_lens.max()
     index_s = utils.new_arange(src_lens, max_src_len).float()
     index_t = utils.new_arange(trg_lens, max_trg_len).float()
-    diff = -(index_t[:, None] - index_s[None, :]).abs()  # max_trg_len, max_src_len
+    diff = -(index_t[:, None] - index_s[None, :]
+             ).abs()  # max_trg_len, max_src_len
     diff = diff.unsqueeze(0).expand(trg_lens.size(0), *diff.size())
-    mask = (src_lens[:, None] - 1 - index_s[None, :]).lt(0).float()  # batch_size, max_src_lens
+    mask = (src_lens[:, None] - 1 - index_s[None, :]
+            ).lt(0).float()  # batch_size, max_src_lens
     logits = (diff / tau - INF * mask[:, None, :])
     prob = logits.softmax(-1)
     return prob
@@ -69,7 +48,8 @@ def _interpolate_assignment(src_lens, tgt_lens, tau=0.3):
     index_t = steps[:, None] @ index_t[None, :]  # batch x max_trg_len
     index = (index_s[None, None, :] - index_t[:, :, None]) ** 2
     src_mask = (src_lens[:, None] - index_s[None, :]).lt(0).float()
-    index = (-index.float() / tau - INF * (src_mask[:, None, :].float())).softmax(dim=-1)
+    index = (-index.float() / tau - INF *
+             (src_mask[:, None, :].float())).softmax(dim=-1)
     return index
 
 
@@ -83,13 +63,15 @@ def _interpolate(src_masks, tgt_masks, tau=0.3):
     steps = src_lens / tgt_lens
     index_t = steps[:, None] @ index_t[None, :]  # batch x max_trg_len
     index = (index_s[None, None, :] - index_t[:, :, None]) ** 2
-    index = (-index.float() / tau - INF * (1 - src_masks[:, None, :].float())).softmax(dim=-1)
+    index = (-index.float() / tau - INF *
+             (1 - src_masks[:, None, :].float())).softmax(dim=-1)
     return index
 
 
 def build_relative_embeddings(args, embedding_dim=None):
     if embedding_dim is None:
-        embedding_dim = args.decoder_embed_dim // getattr(args, "decoder_attention_heads")
+        embedding_dim = args.decoder_embed_dim // getattr(
+            args, "decoder_attention_heads")
     return RelativePositionEmbeddings(
         max_rel_positions=getattr(args, "max_rel_positions", 4),
         embedding_dim=embedding_dim,
@@ -100,39 +82,10 @@ def build_relative_embeddings(args, embedding_dim=None):
 
 @register_model("iwslt16")
 class NAT(NATransformerModel):
-    def __init__(self, args, encoder, decoder):
-        super(NAT, self).__init__(args, encoder, decoder)
-        self.ctc_loss = getattr(args, "ctc_loss", False)
-        self.base_ctc_loss = getattr(args, "base_ctc_loss", False)
-
-        # print("self.args.encoder_path: ", self.args.encoder_path)
-        # if self.args.encoder_path.strip() != "":
-        #     load_pretrained_component_from_model(self.encoder, self.args.encoder_path)
-        #     print("load encoder from ", self.args.encoder_path)
-
-        # if self.args.decoder_path.strip() != "":
-        #     load_pretrained_component_from_model(self.decoder, self.args.decoder_path)
-        #     print("load decoder from ", self.args.decoder_path)
-
-        # if getattr(self.args, "froze_encoder", False):
-        #     print("froze encoder !")
-        #     for param in self.encoder.parameters():
-        #         param.requires_grad = False
-        #
-        # self.load_AT_model = getattr(self.args, "load_AT_model", "")
-        # if self.load_AT_model != '':
-        #     state = load_checkpoint_to_cpu(self.load_AT_model)
-        #     self.load_state_dict(state['model'], strict=False)
 
     @staticmethod
     def add_args(parser):
         NATransformerModel.add_args(parser)
-        parser.add_argument("--use-ptrn-encoder", action="store_true", help="use pretrained encoder")
-        parser.add_argument("--use-ptrn-decoder", action="store_true", help="use pretrained decoder")
-        parser.add_argument("--use-ptrn-embed", action="store_true", help="use the word encoder output")
-        parser.add_argument("--ptrn-encoder-mode", type=int, default=0, help="0 is None, 1 is finetuning, 2 is fixed")
-        parser.add_argument("--ptrn-embed-mode", type=int, default=0, help="0 is None, 1 is finetuning, 2 is fixed")
-        parser.add_argument("--no-share-dec-input-output", action='store_true')
         parser.add_argument("--block-cls", type=str, default="None")
         parser.add_argument("--self-attn-cls", type=str, default="abs")
         parser.add_argument("--enc-block-cls", type=str, default="abs")
@@ -142,14 +95,6 @@ class NAT(NATransformerModel):
         parser.add_argument("--max-rel-positions", type=int, default=4)
         parser.add_argument("--share-rel-embeddings", action='store_true')
         parser.add_argument("--layer-norm-eps", type=float, default=1e-5)
-
-        parser.add_argument('--encoder-path', default="")
-        parser.add_argument('--decoder-path', default="")
-        parser.add_argument('--froze-encoder', action="store_true")
-
-        parser.add_argument('--load-AT-model', default="", type=str)
-
-        parser.add_argument('--ctc-mode', type=str, default="copy")  # W
 
         NATDecoder.add_args(parser)
 
@@ -164,22 +109,13 @@ class NAT(NATransformerModel):
             else:
                 p.requires_grad = False
 
-    def compute_word_accuracy(self, output, reference, mask):
-        if self.training:
-            return 0, 0
-
-        output = output.argmax(-1)
-        output = output[mask]
-        reference = reference[mask]
-
-        word_all = (mask == 1).sum().item()
-        word_correct = (output == reference).sum().item()
-
-        return word_all, word_correct
-
     def forward(
-            self, src_tokens, src_lengths, prev_output_tokens, tgt_tokens, **kwargs
-    ):
+            self,
+            src_tokens,
+            src_lengths,
+            prev_output_tokens,
+            tgt_tokens,
+            **kwargs):
         # encoding
         encoder_out = self.encoder(src_tokens, src_lengths=src_lengths)
 
@@ -204,8 +140,10 @@ class NAT(NATransformerModel):
         }
         # length prediction
         if self.decoder.length_loss_factor > 0:
-            length_out = self.decoder.forward_length(normalize=False, encoder_out=encoder_out)
-            length_tgt = self.decoder.forward_length_prediction(length_out, encoder_out, tgt_tokens)
+            length_out = self.decoder.forward_length(
+                normalize=False, encoder_out=encoder_out)
+            length_tgt = self.decoder.forward_length_prediction(
+                length_out, encoder_out, tgt_tokens)
             losses["length"] = {
                 "out": length_out,
                 "tgt": length_tgt,
@@ -247,7 +185,8 @@ class NAT(NATransformerModel):
         if getattr(args, "use_ptrn_encoder", False) and ptrn_model is not None:
             encoder = ptrn_model.encoder
         elif getattr(args, "use_ptrn_embed", False) and ptrn_model is not None:
-            encoder = cls.build_encoder(args, src_dict, ptrn_model.encoder.embed_tokens)
+            encoder = cls.build_encoder(
+                args, src_dict, ptrn_model.encoder.embed_tokens)
         else:
             encoder_embed_tokens = cls.build_embedding(
                 args, src_dict, args.encoder_embed_dim, args.encoder_embed_path
@@ -256,7 +195,8 @@ class NAT(NATransformerModel):
 
         if args.share_all_embeddings:
             if src_dict != tgt_dict:
-                raise ValueError("--share-all-embeddings requires a joined dictionary")
+                raise ValueError(
+                    "--share-all-embeddings requires a joined dictionary")
             if args.encoder_embed_dim != args.decoder_embed_dim:
                 raise ValueError(
                     "--share-all-embeddings requires --encoder-embed-dim to match --decoder-embed-dim"
@@ -268,7 +208,8 @@ class NAT(NATransformerModel):
                     "--share-all-embeddings not compatible with --decoder-embed-path"
                 )
             decoder_embed_tokens = encoder.embed_tokens
-            args.share_decoder_input_output_embed = True and not getattr(args, "no_share_dec_input_output", False)
+            args.share_decoder_input_output_embed = True and not getattr(
+                args, "no_share_dec_input_output", False)
         else:
             decoder_embed_tokens = cls.build_embedding(
                 args, tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
@@ -279,7 +220,9 @@ class NAT(NATransformerModel):
         if getattr(args, "finetune", False):
             print("Fine tune model is started")
             assert ptrn_model is not None, 'ptrn model should not be None while finetuning'
-            model.load_state_dict(state_dict=ptrn_model.state_dict(), strict=False)
+            model.load_state_dict(
+                state_dict=ptrn_model.state_dict(),
+                strict=False)
             model.fine_tuning_mode(args)
         return model
 
@@ -317,7 +260,12 @@ class NAT(NATransformerModel):
             decoder.apply(init_bert_params)
         return decoder
 
-    def forward_decoder(self, decoder_out, encoder_out, decoding_format=None, **kwargs):
+    def forward_decoder(
+            self,
+            decoder_out,
+            encoder_out,
+            decoding_format=None,
+            **kwargs):
         step = decoder_out.step
         output_tokens = decoder_out.output_tokens
         output_scores = decoder_out.output_scores
@@ -332,10 +280,6 @@ class NAT(NATransformerModel):
             extra_ret=False,
             **kwargs
         ).max(-1)
-        if self.ctc_loss:
-            output_tokens = _maybe_upsample_2d(output_tokens)
-            output_scores = _maybe_upsample_2d(output_scores)
-            output_masks = output_tokens.ne(self.pad)
         # try:
         output_tokens.masked_scatter_(output_masks, _tokens[output_masks])
         output_scores.masked_scatter_(output_masks, _scores[output_masks])
@@ -351,28 +295,42 @@ class NAT(NATransformerModel):
             history=history
         )
 
-    def topk_beam_decoder_inputs(self, encoder_out, src_tokens, tgt_tokens=None, beam=1):
+    def topk_beam_decoder_inputs(
+            self,
+            encoder_out,
+            src_tokens,
+            tgt_tokens=None,
+            beam=1):
         def _forward_length():
             length_tgt = self.decoder.forward_length_prediction(
-                length_out=self.decoder.forward_length(normalize=True, encoder_out=encoder_out),
+                length_out=self.decoder.forward_length(
+                    normalize=True,
+                    encoder_out=encoder_out),
                 encoder_out=encoder_out,
                 tgt_tokens=tgt_tokens,
                 use_true_length=True,
-                beam=beam
-            )  # batch_size, beam
+                beam=beam)  # batch_size, beam
 
-    def initialize_output_tokens(self, encoder_out, src_tokens, tgt_tokens=None):
+    def initialize_output_tokens(
+            self,
+            encoder_out,
+            src_tokens,
+            tgt_tokens=None):
         # length prediction
         if isinstance(self.decoder, NATDecoder):
             length_tgt = self.decoder.forward_length_prediction(
-                length_out=self.decoder.forward_length(normalize=True, encoder_out=encoder_out),
+                length_out=self.decoder.forward_length(
+                    normalize=True,
+                    encoder_out=encoder_out),
                 encoder_out=encoder_out,
                 tgt_tokens=tgt_tokens,
                 use_true_length=True,
             )
         else:
             length_tgt = self.decoder.forward_length_prediction(
-                length_out=self.decoder.forward_length(normalize=True, encoder_out=encoder_out),
+                length_out=self.decoder.forward_length(
+                    normalize=True,
+                    encoder_out=encoder_out),
                 encoder_out=encoder_out,
                 tgt_tokens=tgt_tokens,
             )
@@ -405,7 +363,10 @@ class NAT(NATransformerModel):
     def regenerate_length_beam(self, decoder_out, beam_size):
         output_tokens = decoder_out.output_tokens
         length_tgt = output_tokens.ne(self.pad).sum(1)
-        length_tgt = length_tgt[:, None] + utils.new_arange(length_tgt, 1, beam_size) - beam_size // 2
+        length_tgt = length_tgt[:,
+                     None] + utils.new_arange(length_tgt,
+                                              1,
+                                              beam_size) - beam_size // 2
         length_tgt = length_tgt.view(-1).clamp_(min=2)
         max_length = length_tgt.max()
         idx_length = utils.new_arange(length_tgt, max_length)
@@ -434,8 +395,10 @@ class NATEncoder(TransformerEncoder):
     def __init__(self, args, dictionary, embed_tokens):
         super().__init__(args, dictionary, embed_tokens)
         if getattr(args, "enc_self_attn_cls", "abs") != "abs":
-            rel_keys = build_relative_embeddings(args) if getattr(args, "share_rel_embeddings", False) else None
-            rel_vals = build_relative_embeddings(args) if getattr(args, "share_rel_embeddings", False) else None
+            rel_keys = build_relative_embeddings(args) if getattr(
+                args, "share_rel_embeddings", False) else None
+            rel_vals = build_relative_embeddings(args) if getattr(
+                args, "share_rel_embeddings", False) else None
             if self.encoder_layerdrop > 0.0:
                 self.layers = LayerDropModuleList(p=self.encoder_layerdrop)
             else:
@@ -468,12 +431,6 @@ class NATDecoder(NATransformerDecoder):
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(args, dictionary, embed_tokens, no_encoder_attn)
 
-        # ctc-loss
-        self.ctc_loss = getattr(args, "ctc_loss", False)
-        self.ctc_mode = getattr(args, "ctc_mode", "copy")
-        if self.ctc_mode == 'W':
-            self.ctc_W = torch.nn.Linear(args.decoder_embed_dim, args.decoder_embed_dim * 2)
-
         # decoder inputs
         self.map_func = getattr(args, "mapping_func", "uniform")
         self.map_use = getattr(args, "mapping_use", "embed")
@@ -486,26 +443,24 @@ class NATDecoder(NATransformerDecoder):
         # layer-wise attention
         self.layerwise_attn = getattr(args, "layerwise_attn", False)
 
-        # content trainer
-        if self.content_weight > 0:
-            self.content = nn.ModuleList(self.build_content_trainer(args, self.output_projection))
-            self.state_weight = args.content_state_weight
-            self.layer_weight = args.content_layer_weight
-            self.window_size = args.content_window_size
-
         if getattr(args, "self_attn_cls", "abs") != "abs":
-            rel_keys = build_relative_embeddings(args) if getattr(args, "share_rel_embeddings", False) else None
-            rel_vals = build_relative_embeddings(args) if getattr(args, "share_rel_embeddings", False) else None
+            rel_keys = build_relative_embeddings(args) if getattr(
+                args, "share_rel_embeddings", False) else None
+            rel_vals = build_relative_embeddings(args) if getattr(
+                args, "share_rel_embeddings", False) else None
             if self.decoder_layerdrop > 0.0:
                 self.layers = LayerDropModuleList(p=self.decoder_layerdrop)
             else:
                 self.layers = nn.ModuleList([])
             self.layers.extend(
                 [
-                    self.build_decoder_layer(args, no_encoder_attn, rel_keys, rel_vals, layer_id=layer_id)
-                    for layer_id in range(args.decoder_layers)
-                ]
-            )
+                    self.build_decoder_layer(
+                        args,
+                        no_encoder_attn,
+                        rel_keys,
+                        rel_vals,
+                        layer_id=layer_id) for layer_id in range(
+                    args.decoder_layers)])
 
     @staticmethod
     def add_args(parser):
@@ -516,98 +471,74 @@ class NATDecoder(NATransformerDecoder):
         parser.add_argument("--layerwise-attn", action='store_true')
 
         # input funcition
-        parser.add_argument("--mapping-func", type=str, choices=["soft", "uniform", "interpolate"])
-        parser.add_argument("--mapping-use", type=str, choices=["embed", "output"])
+        parser.add_argument(
+            "--mapping-func",
+            type=str,
+            choices=[
+                "soft",
+                "uniform",
+                "interpolate"])
+        parser.add_argument(
+            "--mapping-use",
+            type=str,
+            choices=[
+                "embed",
+                "output"])
 
         # content-training
-        parser.add_argument("--content-window-size", nargs="*", type=int, default=[-1, ])
-        parser.add_argument("--content-layer-weight", nargs="*", type=float, default=[0.0, ])
-        parser.add_argument("--content-state-weight", nargs="*", type=float, default=[0.0, ])
-        parser.add_argument("--content-share-state", nargs="*", type=int, default=[0, ])
-        parser.add_argument("--content-share-layer", nargs="*", type=int, default=[0, ])
+        parser.add_argument("--content-window-size",
+                            nargs="*", type=int, default=[-1, ])
+        parser.add_argument(
+            "--content-layer-weight",
+            nargs="*",
+            type=float,
+            default=[
+                0.0,
+            ])
+        parser.add_argument(
+            "--content-state-weight",
+            nargs="*",
+            type=float,
+            default=[
+                0.0,
+            ])
+        parser.add_argument(
+            "--content-share-state",
+            nargs="*",
+            type=int,
+            default=[
+                0,
+            ])
+        parser.add_argument(
+            "--content-share-layer",
+            nargs="*",
+            type=int,
+            default=[
+                0,
+            ])
         parser.add_argument("--share-content-all", action="store_true")
         parser.add_argument("--layer-aggregate-func", type=str, default="mean")
 
-        # ctc-loss
-        parser.add_argument('--ctc-loss', action="store_true")
-        parser.add_argument('--base-ctc-loss', action="store_true")
-
-    def compute_content_loss(self, losses, inputs, tgt_tokens, mask=None):
-        """
-        including:
-            - Layer Bag-of-word Loss
-            - Window Bag-of-word Loss
-        """
-
-        inner_states = inputs['inner_states']
-        for i, trainer in enumerate(self.content):
-            if trainer is not None:
-                ret = trainer.forward(
-                    x=inner_states[i + 1].transpose(0, 1),
-                    tgt_tokens=tgt_tokens,
-                    mask=mask,
-                    window_size=self.window_size[i],
-                    layer_weight=self.layer_weight[i],
-                    state_weight=self.state_weight[i],
-                    layer=i
-                )
-                losses.update(ret)
-        return losses
-
-    @property
-    def content_weight(self):
-        return sum(getattr(self.args, "content_layer_weight", [0.0, ])) + sum(
-            getattr(self.args, "content_state_weight", [0.0, ]))
-
-    @classmethod
-    def build_content_trainer(cls, args, out):
-        num_layer = args.decoder_layers
-
-        if len(args.content_share_state) <= num_layer:
-            args.content_share_state += ([0] * (num_layer - len(args.content_share_state)))
-
-        if len(args.content_share_layer) <= num_layer:
-            args.content_share_layer += ([0] * (num_layer - len(args.content_share_layer)))
-
-        if len(args.content_layer_weight) <= num_layer:
-            args.content_layer_weight += ([0.0] * (num_layer - len(args.content_layer_weight)))
-
-        if len(args.content_state_weight) <= num_layer:
-            args.content_state_weight += ([0.0] * (num_layer - len(args.content_state_weight)))
-
-        if len(args.content_window_size) <= num_layer:
-            args.content_window_size += ([-1] * (num_layer - len(args.content_window_size)))
-
-        if getattr(args, "share_content_all", False):
-            trainer = ContentTrainer(
-                args=args,
-                out=out,
-                share_state_out=bool(sum(args.content_share_state)),
-                share_layer_out=bool(sum(args.content_share_layer))
-            )
-        else:
-            trainer = None
-
-        contents = []
-        for i in range(num_layer):
-            if (args.content_layer_weight[i] + args.content_state_weight[i]) > 0:
-                _trainer = trainer if trainer is not None else ContentTrainer(
-                    args=args,
-                    out=out,
-                    share_state_out=bool(args.content_share_state[i]),
-                    share_layer_out=args.content_share_layer[i]
-                )
-                contents.append(_trainer)
-
-        return contents
-
-    def build_decoder_layer(self, args, no_encoder_attn=False, rel_keys=None, rel_vals=None, **kwargs):
-        if getattr(args, "block_cls", "None") == "highway" or getattr(args, "self_attn_cls", "abs") != "abs":
+    def build_decoder_layer(
+            self,
+            args,
+            no_encoder_attn=False,
+            rel_keys=None,
+            rel_vals=None,
+            **kwargs):
+        if getattr(
+                args,
+                "block_cls",
+                "None") == "highway" or getattr(
+            args,
+            "self_attn_cls",
+            "abs") != "abs":
             if getattr(args, "self_attn_cls", "abs") == "abs":
                 return BlockedDecoderLayer(args, no_encoder_attn)
             else:
                 return BlockedDecoderLayer(
-                    args, no_encoder_attn=no_encoder_attn,
+                    args,
+                    no_encoder_attn=no_encoder_attn,
                     relative_keys=rel_keys if rel_keys is not None else build_relative_embeddings(args),
                     relative_vals=rel_vals if rel_vals is not None else build_relative_embeddings(args),
                 )
@@ -615,28 +546,27 @@ class NATDecoder(NATransformerDecoder):
         return super().build_decoder_layer(args, no_encoder_attn)
 
     @ensemble_decoder
-    def forward(self, normalize, encoder_out, prev_output_tokens, step=0, inner=False, **unused):
+    def forward(
+            self,
+            normalize,
+            encoder_out,
+            prev_output_tokens,
+            step=0,
+            inner=False,
+            **unused):
         features, other = self.extract_features(
             prev_output_tokens,
             encoder_out=encoder_out,
             embedding_copy=(step == 0) & self.src_embedding_copy,
             **unused
-
         )
         decoder_out = self.output_layer(features)
-        decoder_out = F.log_softmax(decoder_out, -1) if normalize else decoder_out
+        decoder_out = F.log_softmax(
+            decoder_out, -1) if normalize else decoder_out
         if inner:
             return decoder_out, other
         else:
             return decoder_out
-
-    def ctc_process(self, x, mask):
-        x = x.transpose(0, 1)  # [b, s, d]
-        batch_size, seq_len, dim = x.shape
-        x = self.ctc_W(x).view(batch_size, seq_len * 2, dim).transpose(0, 1)
-
-        mask = _maybe_upsample_2d(mask)
-        return x, mask
 
     def extract_features(
             self,
@@ -646,18 +576,14 @@ class NATDecoder(NATransformerDecoder):
             embedding_copy=False,
             **unused
     ):
-        if self.ctc_loss and self.ctc_mode == 'copy':
-            prev_output_tokens = _maybe_upsample_2d(prev_output_tokens)
 
-        x, decoder_padding_mask, _ = self.forward_decoder_inputs(prev_output_tokens, encoder_out=encoder_out, **unused)
+        x, decoder_padding_mask, _ = self.forward_decoder_inputs(
+            prev_output_tokens, encoder_out=encoder_out, **unused)
 
         embedding = x
         x = x.transpose(0, 1)
         attn = None
         inner_states = [x]
-
-        if self.ctc_loss and self.ctc_mode == 'W':
-            x, decoder_padding_mask = self.ctc_process(x, decoder_padding_mask)
 
         # decoder layers
         _encoder_out = encoder_out.encoder_out
@@ -686,17 +612,14 @@ class NATDecoder(NATransformerDecoder):
         if self.project_out_dim is not None:
             x = self.project_out_dim(x)
 
-        return x, {"attn": attn, "inner_states": inner_states, "embedding": embedding, "ctc_mask": decoder_padding_mask}
+        return x, {"attn": attn, "inner_states": inner_states,
+                   "embedding": embedding, "ctc_mask": decoder_padding_mask}
 
-    def forward_decoder_inputs(self, prev_output_tokens, encoder_out=None, add_position=True, **unused):
-        if "prev_target_embedding" in unused and unused['prev_target_embedding'] != None:
-            positions = (
-                self.embed_positions(prev_output_tokens)
-                if self.embed_positions is not None
-                else None
-            )
-            return unused['prev_target_embedding'], prev_output_tokens.eq(self.padding_idx), positions
-
+    def forward_decoder_inputs(
+            self,
+            prev_output_tokens,
+            encoder_out=None,
+            **unused):
         # forward source representation
         mapping_use = self.map_use
         mapping_func = self.map_func
@@ -724,18 +647,22 @@ class NATDecoder(NATransformerDecoder):
         if mapping_func == "soft":
             length_sources = src_mask.sum(1)
             length_targets = tgt_mask.sum(1)
-            mapped_logits = _softcopy_assignment(length_sources, length_targets)  # batch_size, tgt_len, src_len
+            mapped_logits = _softcopy_assignment(
+                length_sources, length_targets)  # batch_size, tgt_len, src_len
             states = torch.bmm(mapped_logits.to(src_embed.dtype), src_embed)
 
         if mapping_func == "interpolate":
-            # length_sources = src_mask.sum(1)
-            # length_targets = tgt_mask.sum(1)
-            # mapped_logits = _interpolate_assignment(length_sources, length_targets)  # batch_size, tgt_len, src_len
             mapped_logits = _interpolate(src_mask, tgt_mask)
             states = torch.bmm(mapped_logits.to(src_embed.dtype), src_embed)
 
+        x, decoder_padding_mask, positions = self.forward_embedding(prev_output_tokens, states)
+        return x, decoder_padding_mask, positions
 
-    def forward_embedding(self, prev_output_tokens, states=None, add_position=True):
+    def forward_embedding(
+            self,
+            prev_output_tokens,
+            states=None,
+            add_position=True):
         # embed positions
         positions = (
             self.embed_positions(prev_output_tokens)
@@ -757,7 +684,13 @@ class NATDecoder(NATransformerDecoder):
         decoder_padding_mask = prev_output_tokens.eq(self.padding_idx)
         return x, decoder_padding_mask, positions
 
-    def forward_length_prediction(self, length_out, encoder_out, tgt_tokens=None, use_true_length=False, beam_size=1):
+    def forward_length_prediction(
+            self,
+            length_out,
+            encoder_out,
+            tgt_tokens=None,
+            use_true_length=False,
+            beam_size=1):
         if tgt_tokens is not None and use_true_length:  # only used for oracle training.
             length_tgt = tgt_tokens.ne(self.padding_idx).sum(1).long()
             return length_tgt
@@ -767,9 +700,13 @@ class NATDecoder(NATransformerDecoder):
         src_lengs = None
         if self.pred_length_offset:
             if src_masks is None:
-                src_lengs = enc_feats.new_ones(enc_feats.size(1)).fill_(enc_feats.size(0))
+                src_lengs = enc_feats.new_ones(
+                    enc_feats.size(1)).fill_(
+                    enc_feats.size(0))
             else:
-                src_lengs = (~src_masks).transpose(0, 1).type_as(enc_feats).sum(0)
+                src_lengs = (
+                    ~src_masks).transpose(
+                    0, 1).type_as(enc_feats).sum(0)
             src_lengs = src_lengs.long()
 
         if tgt_tokens is not None:
@@ -789,7 +726,8 @@ class NATDecoder(NATransformerDecoder):
                 else:
                     length_tgt = pred_lengs
             else:
-                pred_lengs = length_out.topk(beam_size)[1]  # batch_size, beam_size
+                pred_lengs = length_out.topk(
+                    beam_size)[1]  # batch_size, beam_size
                 if self.pred_length_offset:
                     src_lengs = src_lengs.unsqueeze(-1).expand(-1, beam_size)
                     length_tgt = pred_lengs - 128 + src_lengs
@@ -805,23 +743,28 @@ def base_architecture(args):
     args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 2048)
     args.encoder_layers = getattr(args, "encoder_layers", 6)
     args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 8)
-    args.encoder_normalize_before = getattr(args, "encoder_normalize_before", False)
+    args.encoder_normalize_before = getattr(
+        args, "encoder_normalize_before", False)
     args.encoder_learned_pos = getattr(args, "encoder_learned_pos", False)
     args.decoder_embed_path = getattr(args, "decoder_embed_path", None)
-    args.decoder_embed_dim = getattr(args, "decoder_embed_dim", args.encoder_embed_dim)
+    args.decoder_embed_dim = getattr(
+        args, "decoder_embed_dim", args.encoder_embed_dim)
     args.decoder_ffn_embed_dim = getattr(
         args, "decoder_ffn_embed_dim", args.encoder_ffn_embed_dim
     )
     args.decoder_layers = getattr(args, "decoder_layers", 6)
     args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 8)
-    args.decoder_normalize_before = getattr(args, "decoder_normalize_before", False)
+    args.decoder_normalize_before = getattr(
+        args, "decoder_normalize_before", False)
     args.decoder_learned_pos = getattr(args, "decoder_learned_pos", False)
     args.attention_dropout = getattr(args, "attention_dropout", 0.0)
     args.activation_dropout = getattr(args, "activation_dropout", 0.0)
     args.activation_fn = getattr(args, "activation_fn", "relu")
     args.dropout = getattr(args, "dropout", 0.1)
-    args.adaptive_softmax_cutoff = getattr(args, "adaptive_softmax_cutoff", None)
-    args.adaptive_softmax_dropout = getattr(args, "adaptive_softmax_dropout", 0)
+    args.adaptive_softmax_cutoff = getattr(
+        args, "adaptive_softmax_cutoff", None)
+    args.adaptive_softmax_dropout = getattr(
+        args, "adaptive_softmax_dropout", 0)
     args.share_decoder_input_output_embed = getattr(
         args, "share_decoder_input_output_embed", False
     )
@@ -835,7 +778,8 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(
         args, "decoder_output_dim", args.decoder_embed_dim
     )
-    args.decoder_input_dim = getattr(args, "decoder_input_dim", args.decoder_embed_dim)
+    args.decoder_input_dim = getattr(
+        args, "decoder_input_dim", args.decoder_embed_dim)
 
     # --- special arguments ---
     args.sg_length_pred = getattr(args, "sg_length_pred", False)
@@ -845,19 +789,6 @@ def base_architecture(args):
     args.softmax_copy = getattr(args, "softmax_copy", False)
     args.use_encoder_out = getattr(args, "use_encoder_out", False)
     from fairseq.models.transformer import base_architecture
-    base_architecture(args)
-
-
-@register_model_architecture('iwslt16', 'nat_iwslt16_en_de')
-def nat_iwslt16_de_en(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 512)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 2)
-    args.encoder_layers = getattr(args, 'encoder_layers', 5)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 256)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 512)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 2)
-    args.decoder_layers = getattr(args, 'decoder_layers', 5)
     base_architecture(args)
 
 
@@ -884,45 +815,7 @@ def nat_iwslt14_de_en(args):
     args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 1024)
     args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 4)
     args.decoder_layers = getattr(args, "decoder_layers", 6)
-    base_architecture(args)
-
-
-@register_model_architecture('iwslt16', 'nat_small')
-def nat_small(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 5)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 256)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 256)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 5)
-    base_architecture(args)
-
-
-@register_model_architecture('iwslt16', 'iwslt16')
-def nat_base(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 512)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 8)
-    args.encoder_layers = getattr(args, 'encoder_layers', 6)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 512)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
-    base_architecture(args)
-
-
-@register_model_architecture('iwslt16', 'nat_iwslt')
-def nat_iwslt14_de_en(args):
-    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 400)
-    args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 800)
-    args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 4)
-    args.encoder_layers = getattr(args, "encoder_layers", 3)
-    args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 400)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 800)
-    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 4)
-    args.decoder_layers = getattr(args, "decoder_layers", 3)
+    args.dropout = getattr(args, "dropout", 0.3)
     base_architecture(args)
 
 
