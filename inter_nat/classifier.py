@@ -3,14 +3,13 @@ import numpy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from torch.nn.init import orthogonal_
 
 from fairseq.models import BaseFairseqModel
+from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from inter_nat.util import Tree, get_dep_mat
 from nat_base.layer import build_relative_embeddings, BlockedDecoderLayer
-from nat_base.util import new_arange, get_base_mask, get_pad_mask
+from nat_base.util import new_arange, get_base_mask
 
 
 class BiaffineAttentionDependency(nn.Module):
@@ -37,12 +36,13 @@ class BiaffineAttentionDependency(nn.Module):
         self.head_tree = head_tree
 
         self.dropout = nn.Dropout(self.dropout)
+        self.tree_pad = -1
 
     def get_reference(self, sample_ids):
         tree = self.head_tree.get_sentences(sample_ids, training=self.training)  # 包含bos和eos
         size = max(len(v) for v in tree)
         head_label = numpy.empty(shape=(len(tree), size))
-        head_label.fill(-1)  # -1表示没有意义的节点
+        head_label.fill(self.tree_pad)  # -1表示没有意义的节点
         for i, value in enumerate(tree):
             head_label[i][:len(value)] = value  # 预测bos和eos的父节点
 

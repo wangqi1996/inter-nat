@@ -14,7 +14,7 @@ from nat_base.vanilla_nat import NATDecoder, NAT, nat_wmt_en_de, nat_iwslt14_de_
 class RelationBasedLayer(BlockedDecoderLayer):
 
     def build_self_attention(self, embed_dim, args, add_bias_kv=False, add_zero_attn=False, layer_id=0, **kwargs):
-        if True or layer_id == 0:
+        if layer_id == 0:
             return RelationBasedAttention(
                 embed_dim=embed_dim,
                 num_heads=args.decoder_attention_heads,

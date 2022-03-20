@@ -19,7 +19,7 @@ from fairseq.data import Dictionary, indexed_dataset, data_utils
 DATASET = "/home/data_ti5_c/wangdq/data/fairseq/wmt14/ende-fairseq/"
 save_dir = "/home/wangdq/dependency/wmt-ende/"
 
-split = "train"
+split = "valid"
 os.makedirs(save_dir, exist_ok=True)
 
 source_lang = "en"

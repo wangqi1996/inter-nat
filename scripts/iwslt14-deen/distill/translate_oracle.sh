@@ -2,7 +2,7 @@ DISTILL=/home/data_ti5_c/wangdq/data/fairseq/iwslt14/deen-AT/
 export CUDA_VISIBLE_DEVICES=$1
 
 fairseq-generate $DISTILL/ \
-  --user-dir /home/data_ti5_c/wangdq/new/nat/inter_nat \
+  --user-dir /home/data_ti5_c/wangdq/new/nat/inter_nat3 \
   --gen-subset $3 \
   --seed 1234 \
   --task nat \

@@ -1,5 +1,6 @@
 # encoding=utf-8
 import os
+
 import torch
 
 
@@ -74,6 +75,8 @@ def load_dependency_head_tree(tree_path):
 
 DependencyFileMapping = {
     "iwslt16_deen_raw": "/home/wangdq/dependency/iwslt16-deen/",
+    "iwslt14_deen_distill": "/home/wangdq/dependency/iwslt16-deen/",
+    "wmt14_ende_distill": "/home/data_ti5_c/wangdq/new/nat/dependency/wmt14_ende_distill"
 }
 
 
