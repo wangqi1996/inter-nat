@@ -123,7 +123,7 @@ class RelationClassifierDecoder(NATDecoder):
             **unused):
         x, decoder_padding_mask, position = self.forward_decoder_inputs(prev_output_tokens, encoder_out=encoder_out)
 
-        if unused.get("generate", False) is True:
+        if not self.training:
             features, other = self.extract_features(
                 prev_output_tokens,
                 encoder_out=encoder_out,

@@ -8,7 +8,7 @@ fairseq-train $DISTILL \
   --user-dir /home/data_ti5_c/wangdq/new/nat/inter_nat \
   --save-dir $SAVEDIR --tensorboard-logdir $LOGDIR \
   --ddp-backend=no_c10d --task nat --arch inter_wmt \
-  --eval-bleu --eval-bleu-args '{"beam": 5, "max_len_a": 1.2, "max_len_b": 10, , "max_iter": 0}' \
+  --eval-bleu --eval-bleu-args '{"beam": 5, "max_len_a": 1.2, "max_len_b": 10, "max_iter": 0}' \
   --eval-bleu-detok moses --eval-bleu-remove-bpe \
   --best-checkpoint-metric bleu --maximize-best-checkpoint-metric \
   --length-loss-factor 0.1 \

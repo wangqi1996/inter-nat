@@ -85,7 +85,7 @@ class Tree():
         dir_name = self.get_file_dir(dep_file)
 
         if valid_subset != "test":
-            self.train_tree = load_dependency_head_tree(os.path.join(dir_name, "train.tree"))
+            self.train_tree = load_dependency_head_tree(os.path.join(dir_name, "test.tree"))
         else:
             self.train_tree = None
 

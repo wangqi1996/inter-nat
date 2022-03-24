@@ -17,8 +17,7 @@ class TestDecoder(NATDecoder):
 
         self.dep_file = getattr(self.args, "dep_file", "iwslt16")
 
-        self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, layer=self.layers[-1],
-                                                 token_pad=self.padding_idx)
+        self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, token_pad=self.padding_idx)
 
     def forward_relation(self, hidden_state, sample, encoder_out, target_tokens, **kwargs):
         if kwargs.get("generate", False):
@@ -56,7 +55,7 @@ class TestDecoder(NATDecoder):
                                 content.append(token[i] + ',' + token[t - 1])
                         content = str(sample_ids[index].item()) + ";" + ";".join(content)
                         f.write(content + '\n')
-
+            return None
         else:
             ref_embedding, _, _ = self.forward_embedding(sample['target'])
             ref_embedding = ref_embedding.transpose(0, 1)

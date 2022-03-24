@@ -87,6 +87,7 @@ class Encoder(BaseFairseqModel):
         self.layers = nn.ModuleList()
         rel_keys = build_relative_embeddings(args)
         rel_vals = build_relative_embeddings(args)
+
         for i in range(layer_num):
             self.layers.extend([BlockedDecoderLayer(
                 args,
