@@ -1,21 +1,24 @@
-DISTILL=/home/data_ti5_c/wangdq/data/fairseq/iwslt14/deen-AT/
-export CUDA_VISIBLE_DEVICES=$1
+DISTILL=/home/data_ti5_c/wangdq/data/fairseq/wmt14/ende-fairseq/
+SAVEDIR=/home/wangdq/save/inter/wmt14_ende_distill/$4
 log=$2
 genset=$3
-path=/home/wangdq/save/inter/iwslt14_deen_distill/$4
 
-fairseq-generate $DISTILL/ \
+export CUDA_VISIBLE_DEVICES=$1
+export TOKENIZERS_PARALLELISM=false
+fairseq-generate \
+  $DISTILL/ \
   --user-dir /home/data_ti5_c/wangdq/new/nat/inter_nat3 \
   --gen-subset $genset \
   --seed 1234 \
   --task nat \
   --remove-bpe \
-  --batch-size 16 \
-  --beam 128 \
+  --batch-size 128 \
+  --beam 1 \
+  --remove-bpe \
   --iter-decode-max-iter 0 \
   --iter-decode-eos-penalty 0 \
-  -s de -t en \
-  --path $path/checkpoint_ave_best.pt \
+  -s en -t de \
+  --path $SAVEDIR/checkpoint_ave_best.pt \
   --max-len-a 1.2 \
   --max-len-b 10 \
   --results-path ~/$log \

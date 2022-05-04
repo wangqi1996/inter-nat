@@ -10,20 +10,18 @@ from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from inter_nat.classifier import RelationClassifier
 from inter_nat.model import RelationBasedLayer, InterNAT
 from inter_nat.util import ParentRelationMat
-from nat_base.vanilla_nat import NATDecoder, NAT, nat_wmt_en_de, nat_iwslt14_de_en
+from nat_base.vanilla_nat import NATDecoder, nat_wmt_en_de, nat_iwslt14_de_en
 
 
 class Test3Decoder(NATDecoder):
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(args, dictionary, embed_tokens, no_encoder_attn)
 
-        self.dep_file = getattr(self.args, "dep_file", "iwslt16")
-
+        self.dep_file = getattr(self.args, "dep_file", "iwslt14_deen_distill")
         self.relative_dep_mat = ParentRelationMat(valid_subset=self.args.valid_subset, args=args,
                                                   dep_file=self.dep_file)
 
-        self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, token_pad=self.padding_idx,
-                                                 layer=self.layers[-1])
+        self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, dict=self.dictionary)
 
         # 对三角矩阵
         self._build_diag(200)
@@ -47,11 +45,24 @@ class Test3Decoder(NATDecoder):
 
             return loss, None
 
+    # def _build_diag(self, max_seq_len):
+    #     self.max_seq_len = max_seq_len
+    #     _mat = [1 for _ in range(self.max_seq_len)]
+    #     _mat2 = [1 for _ in range(self.max_seq_len - 1)]
+    #     self.max_dep_mat = torch.from_numpy(np.diag(_mat2, -1) + np.diag(_mat, 0) + np.diag(_mat2, 1)).cuda()
+    #     self.eye_mat = torch.eye(max_seq_len, max_seq_len).cuda().bool()
+
     def _build_diag(self, max_seq_len):
         self.max_seq_len = max_seq_len
-        _mat = [1 for _ in range(self.max_seq_len)]
         _mat2 = [1 for _ in range(self.max_seq_len - 1)]
-        self.max_dep_mat = torch.from_numpy(np.diag(_mat2, -1) + np.diag(_mat, 0) + np.diag(_mat2, 1)).cuda()
+        # left2
+        # _mat3 = [1 for _ in range(self.max_seq_len - 2)]
+        # self.max_dep_mat = torch.from_numpy(np.diag(_mat3, -2) + np.diag(_mat, 0) + np.diag(_mat2, -1)).cuda()
+        # left1
+        # self.max_dep_mat = torch.from_numpy(np.diag(_mat, 0) + np.diag(_mat2, -1)).cuda()
+
+        self.max_dep_mat = torch.from_numpy(np.diag(_mat2, -1) + np.diag(_mat2, 1)).cuda()
+        self.eye_mat = torch.eye(max_seq_len, max_seq_len).cuda().bool()
 
     def extract_features(
             self,
@@ -82,9 +93,18 @@ class Test3Decoder(NATDecoder):
                 batch_size, seq_len = prev_output_tokens.shape
                 if seq_len > self.max_seq_len:
                     self._build_diag(seq_len)
+
+                mask = prev_output_tokens.ne(self.dictionary.unk())
                 dep_mat = self.max_dep_mat[:seq_len, :seq_len].repeat(batch_size, 1, 1)
-                dep_mat = dep_mat.masked_fill(decoder_padding_mask.unsqueeze(-1), 0)
-                dep_mat = dep_mat.masked_fill(decoder_padding_mask.unsqueeze(-2), 0)
+                dep_mat = dep_mat.masked_fill(mask.unsqueeze(-1), 0)
+                dep_mat = dep_mat.masked_fill(mask.unsqueeze(-2), 0)
+
+                eye_mat = self.eye_mat[:seq_len, :seq_len].unsqueeze(0)
+                # eye_mat = eye_mat.masked_fill(~mask.unsqueeze(-1), False)
+                # eye_mat = eye_mat.masked_fill(~mask.unsqueeze(-2), False)
+                dep_mat.masked_fill_(eye_mat, 1)
+                # diag
+                # dep_mat = eye_mat.long().repeat(batch_size, 1, 1)
                 unused['dependency_mat'] = dep_mat
 
             x, attn, _ = layer(

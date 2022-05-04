@@ -1,8 +1,10 @@
 export CUDA_VISIBLE_DEVICES=$1
 export TOKENIZERS_PARALLELISM=false
 DISTILL=/home/data_ti5_c/wangdq/data/fairseq/iwslt14/deen-AT/
-SAVEDIR=/home/wangdq/save/inter/iwslt14_deen_distill/inter_diag
-LOGDIR=/home/wangdq/log/inter/iwslt14_deen_distill/inter_diag
+SAVEDIR=/home/wangdq/save/inter/iwslt14_deen_distill/sparse2
+LOGDIR=/home/wangdq/log/inter/iwslt14_deen_distill/sparse2
+rm -rf $SAVEDIR
+rm -rf $LOGDIR
 fairseq-train $DISTILL \
   --user-dir /home/data_ti5_c/wangdq/new/nat/inter_nat3 \
   --save-dir $SAVEDIR --tensorboard-logdir $LOGDIR \
@@ -40,8 +42,9 @@ fairseq-train $DISTILL \
   --num-workers 0 \
   -s de -t en \
   --no-epoch-checkpoints --save-interval-updates 1000 --keep-interval-updates 5 \
-  --no-last-checkpoints --validate-after-updates 20000 \
+  --validate-after-updates 20000 \
   --keep-best-checkpoints 5 \
   --left-pad-source False \
   --batch-size-valid 20 \
-  --weight 2 --dep-file iwslt16_deen_raw
+  --weight 2 --dep-file iwslt14_deen_distill
+#  --patience 50

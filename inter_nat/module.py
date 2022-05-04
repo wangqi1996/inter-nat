@@ -190,8 +190,8 @@ class RelationBasedAttention(MultiheadAttention):
         mask = relative_positions_matrix.bool()
         mask = mask.unsqueeze(1).repeat(1, self.num_heads, 1, 1).contiguous().view(bsz * self.num_heads, tgt_len,
                                                                                    tgt_len)
-        mask[:, :, 0] = True
         attn_weights = attn_weights.masked_fill(~mask, float("-inf"))
+        key_padding_mask = None  # 此时是否需要这个呢？
 
         assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
 

@@ -1,8 +1,8 @@
 export CUDA_VISIBLE_DEVICES=$1
 export MKL_THREADING_LAYER=GUN
 DISTILL=/home/data_ti5_c/wangdq/data/fairseq/wmt14/ende-fairseq/
-SAVEDIR=/home/wangdq/save/inter/wmt14_ende_distill/inter
-LOGDIR=/home/wangdq/log/inter/wmt14_ende_distill/inter
+SAVEDIR=/home/wangdq/save/inter/wmt14_ende_distill/inter_all
+LOGDIR=/home/wangdq/log/inter/wmt14_ende_distill/inter_all
 rm -rf $LOGDIR
 fairseq-train $DISTILL \
   --user-dir /home/data_ti5_c/wangdq/new/nat/inter_nat \
@@ -46,3 +46,4 @@ fairseq-train $DISTILL \
   --dep-file wmt14_ende_distill \
   --weight 3 \
   --fp16
+#  --restore-file /home/wangdq/save/inter/wmt14_ende_distill/inter/checkpoint_10_20000.pt

@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from torch.nn.init import orthogonal_
 
 from fairseq.models import BaseFairseqModel
-from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from inter_nat.util import Tree, get_dep_mat
 from nat_base.layer import build_relative_embeddings, BlockedDecoderLayer
 from nat_base.util import new_arange, get_base_mask
@@ -42,15 +41,24 @@ class BiaffineAttentionDependency(nn.Module):
         tree = self.head_tree.get_sentences(sample_ids, training=self.training)  # 包含bos和eos
         size = max(len(v) for v in tree)
         head_label = numpy.empty(shape=(len(tree), size))
-        head_label.fill(self.tree_pad)  # -1表示没有意义的节点
+        head_label.fill(self.tree_pad)
         for i, value in enumerate(tree):
-            head_label[i][:len(value)] = value  # 预测bos和eos的父节点
+            value[0] = value[-1] = self.tree_pad  # don't predict the head of <bos> and <eos>
+            head_label[i][:len(value)] = value
 
         head_label = torch.from_numpy(head_label).long()
 
         return head_label
 
     def compute_loss(self, outputs, targets):
+        """
+        :param outputs: [batsh, seq_len, seq_len]
+        :param targets: [batch, seq_len]
+        :return:
+        """
+        mask = targets.ne(self.tree_pad)
+        outputs = outputs[mask]
+        targets = targets[mask]
         logits = F.log_softmax(outputs, dim=-1)
         losses = F.nll_loss(logits, targets.to(logits.device), reduction='none')
         loss = losses.mean()
@@ -71,18 +79,9 @@ class BiaffineAttentionDependency(nn.Module):
         return head_dep_result
 
 
-def copy_module(module):
-    import copy
-    new_module = copy.deepcopy(module)
-    new_module.apply(init_bert_params)
-    for param in new_module.parameters():
-        param.requires_grad = True
-    return new_module
-
-
 class Encoder(BaseFairseqModel):
 
-    def __init__(self, args, layer_num=4, **kwargs):
+    def __init__(self, args, layer_num=4):
         super().__init__()
         self.layers = nn.ModuleList()
         rel_keys = build_relative_embeddings(args)
@@ -107,29 +106,30 @@ class Encoder(BaseFairseqModel):
                 self_attn_padding_mask=padding_mask,
                 need_attn=False,
                 need_head_weights=False,
+                # dependency_mat=dep_mat
             )
         return x
 
 
 class RelationClassifier(BaseFairseqModel):
 
-    def __init__(self, args, dep_file="", token_pad=1, layer=None, **kwargs):
+    def __init__(self, args, dep_file="", dict=None):
         super().__init__()
-        self.token_pad = token_pad
-        self.tree_pad = -1
 
         self.args = args
-        self.encoder = Encoder(args, layer=layer)
+        self.encoder = Encoder(args)
         self.dropout = nn.Dropout(args.dropout)
 
-        self.mlp_input_dim = args.decoder_embed_dim
         self.head_tree = Tree(valid_subset=self.args.valid_subset, dep_file=dep_file)
 
-        self.biaffine_parser = BiaffineAttentionDependency(input_dim=self.mlp_input_dim, head_tree=self.head_tree,
+        self.biaffine_parser = BiaffineAttentionDependency(input_dim=args.decoder_embed_dim, head_tree=self.head_tree,
                                                            dropout=args.dropout)
 
         self.weight = getattr(args, "weight", 1)
-        self.noglancing = getattr(args, "noglancing", False)
+        self.token_pad = dict.pad()
+        self.token_bos = dict.bos()
+        self.token_eos = dict.eos()
+        self.tree_pad = self.biaffine_parser.tree_pad
 
     def get_random_mask_output(self, mask_length=None, target_token=None, hidden_state=None, reference_embedding=None,
                                reference_mask=None):
@@ -151,18 +151,25 @@ class RelationClassifier(BaseFairseqModel):
 
         return output_embedding.transpose(0, 1)
 
-    def get_mask_num(self, label, reference, reference_mask, update_nums):
+    def get_mask_num(self, label, reference, reference_mask, update_nums, sample_ids):
         ratio = 0.5 - 0.2 / 300000 * update_nums
-        diff = ((label != reference) & reference_mask).sum(-1).detach()
+        try:
+            diff = ((label != reference) & reference_mask).long().sum(-1).detach()
+        except:
+            from nat_base.nat_task import logger
+            logger.info("self.training", self.training)
+            logger.info("label.shape", label.shape)
+            logger.info("reference.shape", reference.shape)
+            logger.info("sample_ids", sample_ids)
+            diff = reference_mask.long().sum(-1).detach()
         mask_length = (diff * ratio).round()
         return mask_length
 
     def _forward_classifier(self, hidden_state, decoder_padding_mask, encoder_out):
-        hidden_state = self.dropout(hidden_state)
+        # 不dropout的好
         hidden_state = self.encoder.forward(hidden_state, encoder_out, decoder_padding_mask)
         hidden_state = hidden_state.transpose(0, 1)
 
-        hidden_state = self.dropout(hidden_state)
         score = self.biaffine_parser.forward_classifier(hidden_state)  # [b, tgt_len, tgt_len]
         return score
 
@@ -170,29 +177,42 @@ class RelationClassifier(BaseFairseqModel):
         sample_ids = sample['id'].cpu().tolist()
         oracle_head = self.biaffine_parser.get_reference(sample_ids).to(hidden_state.device)
         oracle_token = sample['target']
+        pad_mask = oracle_token.eq(self.token_pad)
 
-        with torch.no_grad():
-            pad_mask = oracle_token.eq(self.token_pad)
-            score = self._forward_classifier(hidden_state, pad_mask, encoder_out)
-            label = score.argmax(-1)
-            mask_length = self.get_mask_num(label, oracle_head, oracle_token.ne(self.token_pad),
-                                            kwargs.get('update_num', 300000))
+        if self.training:
+            with torch.no_grad():
+                score = self._forward_classifier(hidden_state, pad_mask, encoder_out)
+                label = self.get_head(score, oracle_token)
 
-        hidden_state = self.get_random_mask_output(mask_length, oracle_token, hidden_state,
-                                                   ref_embedding, reference_mask=get_base_mask(oracle_token))
+                mask_length = self.get_mask_num(label, oracle_head, oracle_head.ne(self.tree_pad),
+                                                kwargs.get('update_num', 300000), sample_ids)
+
+            hidden_state = self.get_random_mask_output(mask_length, oracle_token, hidden_state,
+                                                       ref_embedding, reference_mask=get_base_mask(oracle_token))
 
         score = self._forward_classifier(hidden_state, pad_mask, encoder_out)
 
-        _mask = oracle_head != self.tree_pad
-        b_loss = self.biaffine_parser.compute_loss(score[_mask], oracle_head[_mask]) * self.weight
+        b_loss = self.biaffine_parser.compute_loss(score, oracle_head) * self.weight
         loss = {"relation": {"loss": b_loss}}
 
         return loss
 
-    def inference(self, sample=None, hidden_state=None, target_tokens=None, encoder_out=None):
-        score = self._forward_classifier(hidden_state, target_tokens.eq(self.token_pad), encoder_out)
-        # TODO mask the pad token.
+    def get_head(self, score, target_tokens):
+        # 1. the score between the token and eos/pad token is 0
+        mask = target_tokens.eq(self.token_eos) | target_tokens.eq(self.token_pad)
+        score.masked_fill_(mask.unsqueeze(1), float('-inf'))
         head = score.argmax(-1)
+        return head
+
+    def inference(self, hidden_state=None, target_tokens=None, encoder_out=None, **kwargs):
+        score = self._forward_classifier(hidden_state, target_tokens.eq(self.token_pad), encoder_out)
+        head = self.get_head(score, target_tokens)
+
+        # 2. reset the head of bos and eos
+        head[:, 0] = 0
+        target_length = target_tokens.ne(self.token_pad).long().sum(-1)
+        for index, l in enumerate(target_length.cpu().tolist()):
+            head[index][l - 1] = l - 1
 
         mat = get_dep_mat(head, target_tokens.ne(self.token_pad))
 

@@ -5,7 +5,7 @@
       <paths name="173">
         <serverdata>
           <mappings>
-            <mapping deploy="/" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/data_ti5_c/wangdq/new/nat" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
@@ -23,10 +23,10 @@
           </mappings>
         </serverdata>
       </paths>
-      <paths name="20096">
+      <paths name="20080">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

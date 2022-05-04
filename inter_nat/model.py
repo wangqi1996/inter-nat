@@ -34,13 +34,10 @@ class RelationBasedDecoder(NATDecoder):
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(args, dictionary, embed_tokens, no_encoder_attn)
 
-        self.dep_file = getattr(self.args, "dep_file", "iwslt16")
-
+        self.dep_file = getattr(self.args, "dep_file", "iwslt14_deen_distill")
         self.relative_dep_mat = ParentRelationMat(valid_subset=self.args.valid_subset, args=args,
                                                   dep_file=self.dep_file)
-
-        self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, token_pad=self.padding_idx,
-                                                 layer=self.layers[-1])
+        self.dep_classifier = RelationClassifier(args=args, dep_file=self.dep_file, dict=self.dictionary)
 
     def build_decoder_layer(self, args, no_encoder_attn=False, rel_keys=None, rel_vals=None, layer_id=0, **kwargs):
         return RelationBasedLayer(args, no_encoder_attn=no_encoder_attn, relative_keys=rel_keys,
@@ -80,7 +77,7 @@ class RelationBasedDecoder(NATDecoder):
             dep_loss, dep_mat = None, None
 
         if dep_mat is not None:
-            unused['dependency_mat'] = dep_mat
+            unused['dependency_mat'] = dep_mat  # [0 , 1] value
         else:
             unused['dependency_mat'] = self.get_dependency_mat(unused['sample'])
 
@@ -151,7 +148,7 @@ class InterNAT(SuperClass):
             "word_ins": {
                 "out": word_ins_out,
                 "tgt": tgt_tokens,
-                "mask": tgt_tokens.ne(self.pad),
+                "mask": prev_output_tokens.eq(self.unk),
                 "ls": self.args.label_smoothing,
                 "nll_loss": True,
             }

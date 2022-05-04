@@ -5,8 +5,11 @@ import torch
 
 
 def get_dep_mat(all_head, mask, dtype=torch.long):
-    """父节点"""
-    all_head.masked_fill_(~mask, 0)
+    """
+    1. <bos> <eos> <pad> don't have the dependency relation. ==> don't have the head node.
+    2. <bos> <eos> <pad> has the "itself" relation.
+    3. mask only for <pad> token.
+    """
     batch_size, tgt_len = all_head.shape
 
     flat_all_head = all_head.view(-1)
@@ -16,49 +19,29 @@ def get_dep_mat(all_head, mask, dtype=torch.long):
     dep_mat = all_head.new_zeros((batch_size, tgt_len, tgt_len), dtype=dtype).fill_(0)
 
     dep_mat = dep_mat.view(-1)
-    dep_mat[flat_all_head] = 1
-    dep_mat[same] = 1
+    dep_mat[flat_all_head] = 1  # dependency relation
 
+    if mask is not None:
+        dep_mat = dep_mat.view(batch_size, tgt_len, tgt_len)
+        dep_mat.masked_fill_(~mask.unsqueeze(-1), 0)
+        dep_mat.masked_fill_(~mask.unsqueeze(-2), 0)
+
+        dep_mat = dep_mat.view(-1)
+
+    # dep_mat[same] = 1  # diag relation
     dep_mat = dep_mat.view(batch_size, tgt_len, tgt_len)
-    dep_mat.masked_fill_(~mask.unsqueeze(-1), 0)
-    dep_mat.masked_fill_(~mask.unsqueeze(-2), 0)
+    if mask is not None:
+        eye_mat = torch.eye(tgt_len, tgt_len).cuda().bool().unsqueeze(0).repeat(batch_size, 1, 1)
+        eye_mat.masked_fill_(mask.unsqueeze(-1), False)
+        eye_mat.masked_fill_(mask.unsqueeze(-2), False)
+        dep_mat.masked_fill_(eye_mat, 1)
 
     # 对称
     mask_1 = dep_mat == 1
     mask_1 = mask_1.transpose(-1, -2)
-    dep_mat = dep_mat.masked_fill(mask_1, 1)
+    dep_mat.masked_fill_(mask_1, 1)
 
     return dep_mat
-
-
-# def get_dep_mat(all_head, mask, dtype=torch.uint8):
-#     """ 祖父节点 """
-#     all_head.masked_fill_(~mask, 0)
-#     batch_size, tgt_len = all_head.shape
-#
-#     flat_all_head = all_head.view(-1)
-#     add = torch.arange(0, batch_size * tgt_len * tgt_len, tgt_len).to(all_head.device)
-#     flat_all_head = flat_all_head + add
-#     dep_mat = all_head.new_zeros((batch_size, tgt_len, tgt_len), dtype=dtype).fill_(0)
-#
-#     dep_mat = dep_mat.view(-1)
-#     dep_mat[flat_all_head] = 1
-#
-#     dep_mat = dep_mat.view(batch_size, tgt_len, tgt_len)
-#     dep_mat.masked_fill_(~mask.unsqueeze(-1), 0)
-#     dep_mat.masked_fill_(~mask.unsqueeze(-2), 0)
-#     # 祖父节点
-#     dep_mat = torch.matmul(dep_mat.float(), dep_mat.float()).to(dtype) + dep_mat
-#
-#     # 对角线 & 对称
-#     eye_tensor = torch.eye(tgt_len, tgt_len).repeat(batch_size, 1, 1).to(dep_mat)
-#     dep_mat = (dep_mat + eye_tensor)
-#     dep_mat = dep_mat + dep_mat.transpose(-1, -2)
-#     dep_mat = dep_mat.clip(0, 1)
-#     dep_mat.masked_fill_(~mask.unsqueeze(-1), 0)
-#     dep_mat.masked_fill_(~mask.unsqueeze(-2), 0)
-#
-#     return dep_mat
 
 
 def load_dependency_head_tree(tree_path):
@@ -74,7 +57,6 @@ def load_dependency_head_tree(tree_path):
 
 
 DependencyFileMapping = {
-    "iwslt16_deen_raw": "/home/wangdq/dependency/iwslt16-deen/",
     "iwslt14_deen_distill": "/home/wangdq/dependency/iwslt16-deen/",
     "wmt14_ende_distill": "/home/data_ti5_c/wangdq/new/nat/dependency/wmt14_ende_distill"
 }
@@ -85,7 +67,7 @@ class Tree():
         dir_name = self.get_file_dir(dep_file)
 
         if valid_subset != "test":
-            self.train_tree = load_dependency_head_tree(os.path.join(dir_name, "test.tree"))
+            self.train_tree = load_dependency_head_tree(os.path.join(dir_name, "train.tree"))
         else:
             self.train_tree = None
 
@@ -111,8 +93,7 @@ class ParentRelationMat():
         result = []
         for sample_id, head in enumerate(tree):
             head = torch.LongTensor(head)
-            mask = head.new_ones(head.size()).bool().fill_(True)
-            dep_mat = get_dep_mat(head.unsqueeze(0), mask.unsqueeze(0), dtype=torch.uint8).squeeze(0)
+            dep_mat = get_dep_mat(head.unsqueeze(0), None, dtype=torch.uint8).squeeze(0)
             result.append(dep_mat)
 
         return result
@@ -120,6 +101,9 @@ class ParentRelationMat():
     def get_relation_mat(self, sample_ids, reference, training=True):
         batch_size, seq_len = reference.size()
         dep_tensor = torch.eye(seq_len, seq_len).repeat(batch_size, 1, 1).to(reference)
+        mask = reference.ne(1)  # pad == 1
+        dep_tensor.masked_fill_(mask.unsqueeze(-1), 0)
+        dep_tensor.masked_fill_(mask.unsqueeze(-2), 0)
 
         mat = self.train_mat if training else self.valid_mat
         relations = [mat[id] for id in sample_ids]
